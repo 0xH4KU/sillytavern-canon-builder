@@ -1,0 +1,4 @@
+interface:
+  display_name: "Build Lorebook"
+  short_description: "Build and verify sourced SillyTavern lorebooks"
+  default_prompt: "Use $build-lorebook to build and independently verify a spoiler-controlled SillyTavern lorebook from this Fandom wiki."
