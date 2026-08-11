@@ -1,0 +1,4 @@
+interface:
+  display_name: "Build Character Card"
+  short_description: "Build sourced, engaging SillyTavern character cards"
+  default_prompt: "Use $build-character-card to build and review a sourced SillyTavern character card."

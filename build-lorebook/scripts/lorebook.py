@@ -45,6 +45,10 @@ REVIEW_CHECKS = (
     "continuity",
     "atomicity",
 )
+REVIEW_ISSUE_CATEGORIES = set(REVIEW_CHECKS) | {
+    "coverage",
+    "relationship_fidelity",
+}
 MAX_SUPPORTING_SOURCES = 3
 MIN_EVIDENCE_CHARS = 32
 SOURCE_MANIFEST_VERSION = 1
@@ -1329,6 +1333,102 @@ def valid_string_list(value, minimum=0, maximum=8):
     )
 
 
+def validate_source_evidence(workspace, entry, prefix):
+    evidence = entry.get("source_evidence")
+    if evidence is None:
+        return []
+    if not isinstance(evidence, list) or not evidence:
+        return [f"{prefix}.source_evidence must be a non-empty array"]
+
+    errors = []
+    sentences = content_sentences(entry.get("content", ""))
+    source_ids = set(entry.get("source_page_ids", []))
+    covered = set()
+    cited_source_ids = set()
+    seen = set()
+    source_cache = {}
+    expected_fields = {"page_id", "source_quote", "supports"}
+    for index, item in enumerate(evidence):
+        label = f"{prefix}.source_evidence[{index}]"
+        if not isinstance(item, dict):
+            errors.append(f"{label} must be an object")
+            continue
+        if set(item) != expected_fields:
+            errors.append(
+                f"{label} fields must be: {', '.join(sorted(expected_fields))}"
+            )
+        page_id = item.get("page_id")
+        if page_id not in source_ids:
+            errors.append(f"{label}.page_id must reference an entry source")
+            continue
+        cited_source_ids.add(page_id)
+        supports = item.get("supports")
+        if (
+            not isinstance(supports, list)
+            or not supports
+            or any(not _is_int(value) for value in supports)
+            or len(supports) != len(set(supports))
+        ):
+            errors.append(f"{label}.supports must contain unique sentence indexes")
+            supports = []
+        valid_supports = []
+        for sentence_index in supports:
+            if sentence_index not in range(len(sentences)):
+                errors.append(f"{label}.supports contains an unknown sentence index")
+            else:
+                valid_supports.append(sentence_index)
+                covered.add(sentence_index)
+        quote_value = item.get("source_quote")
+        if (
+            not isinstance(quote_value, str)
+            or evidence_length(quote_value) < MIN_EVIDENCE_CHARS
+        ):
+            errors.append(
+                f"{label}.source_quote must contain at least "
+                f"{MIN_EVIDENCE_CHARS} characters"
+            )
+            continue
+        if quote_contains_metadata(quote_value):
+            errors.append(f"{label}.source_quote must come from article body text")
+            continue
+        record_key = (page_id, normalized_text(quote_value))
+        if record_key in seen:
+            errors.append(
+                f"{label} duplicates an evidence quote; merge its supports instead"
+            )
+        seen.add(record_key)
+        if page_id not in source_cache:
+            source_path = Path(workspace) / "sources" / f"{page_id}.txt"
+            try:
+                source_cache[page_id] = normalized_text(
+                    source_body(source_path.read_text(encoding="utf-8"))
+                )
+            except FileNotFoundError:
+                source_cache[page_id] = ""
+        if normalized_text(quote_value) not in source_cache[page_id]:
+            errors.append(f"{label}.source_quote was not found in the cached source")
+        supported_text = " ".join(sentences[value] for value in valid_supports)
+        claim_terms = evidence_terms(supported_text)
+        quote_terms = evidence_terms(quote_value)
+        if claim_terms and quote_terms and not claim_terms & quote_terms:
+            errors.append(
+                f"{label}.source_quote has no meaningful term overlap with its claims"
+            )
+
+    for index, sentence in enumerate(sentences):
+        if index not in covered:
+            errors.append(
+                f"{prefix}.source_evidence does not cover sentence {index}: {sentence}"
+            )
+    unused_sources = source_ids - cited_source_ids
+    if unused_sources:
+        errors.append(
+            f"{prefix}.source_evidence does not use source page IDs: "
+            + ", ".join(str(value) for value in sorted(unused_sources))
+        )
+    return errors
+
+
 def validate_entry(project, selection_item, entry):
     entry_id = selection_item.get("id", "unknown")
     prefix = f"entry {entry_id}"
@@ -1688,6 +1788,183 @@ def pending_selection_review(project, candidates, selection):
     }
 
 
+def pending_entry_review_v2(workspace, project, entry):
+    return {
+        "id": entry["id"],
+        "artifact_hash": entry_artifact_hash(workspace, project, entry),
+        "status": "pending",
+        "issues": [],
+        "risk_tests": [],
+    }
+
+
+def pending_selection_review_v2(project, candidates, selection):
+    return {
+        "artifact_hash": selection_artifact_hash(project, candidates, selection),
+        "status": "pending",
+        "issues": [],
+    }
+
+
+def validate_review_issues(value, status, prefix):
+    errors = []
+    if not isinstance(value, list):
+        return [f"{prefix}.issues must be an array"]
+    if status == "pass" and value:
+        errors.append(f"{prefix}.issues must be empty when status is pass")
+    if status == "fail" and not value:
+        errors.append(f"{prefix}.issues must explain a failed review")
+    for index, issue in enumerate(value):
+        label = f"{prefix}.issues[{index}]"
+        if not isinstance(issue, dict):
+            errors.append(f"{label} must be an object")
+            continue
+        expected = {"category", "message", "targets"}
+        if set(issue) != expected:
+            errors.append(f"{label} fields must be: {', '.join(sorted(expected))}")
+        if issue.get("category") not in REVIEW_ISSUE_CATEGORIES:
+            errors.append(f"{label}.category is invalid")
+        if not isinstance(issue.get("message"), str) or generic_review_note(
+            issue.get("message", "")
+        ):
+            errors.append(f"{label}.message must describe a specific defect")
+        if not valid_string_list(issue.get("targets"), 1, 8):
+            errors.append(f"{label}.targets must contain 1..8 artifact locations")
+    return errors
+
+
+def validate_generated_trigger_rules(project, entry, parent_entry, prefix):
+    if entry.get("settings", {}).get("strategy") != "keyword":
+        return []
+    errors = []
+    primary = entry.get("keywords", [])
+    secondary = entry.get("secondary_keywords", [])
+    logic = entry.get("settings", {}).get("selective_logic", 0)
+
+    def check(text, expected, label):
+        actual = entry_activates(entry, text)
+        if actual != expected:
+            errors.append(
+                f"{prefix} generated trigger check {label} expected "
+                f"activation={str(expected).lower()} but got {str(actual).lower()}"
+            )
+
+    for key in primary:
+        if not secondary:
+            check(key, True, repr(key))
+        elif logic == 0:
+            check(key, False, f"primary-only {key!r}")
+            for secondary_key in secondary:
+                check(
+                    f"{key} {secondary_key}",
+                    True,
+                    f"AND ANY {key!r} + {secondary_key!r}",
+                )
+        elif logic == 1:
+            check(key, False, f"primary-only {key!r}")
+            if len(secondary) > 1:
+                for secondary_key in secondary:
+                    check(
+                        f"{key} {secondary_key}",
+                        False,
+                        f"partial AND ALL {key!r} + {secondary_key!r}",
+                    )
+            check(
+                " ".join([key, *secondary]),
+                True,
+                f"AND ALL for {key!r}",
+            )
+        elif logic == 2:
+            check(key, True, f"primary-only {key!r}")
+            for secondary_key in secondary:
+                check(
+                    f"{key} {secondary_key}",
+                    False,
+                    f"NOT ANY {key!r} + {secondary_key!r}",
+                )
+        elif logic == 3:
+            check(key, True, f"primary-only {key!r}")
+            if len(secondary) > 1:
+                for secondary_key in secondary:
+                    check(
+                        f"{key} {secondary_key}",
+                        True,
+                        f"partial NOT ALL {key!r} + {secondary_key!r}",
+                    )
+            check(
+                " ".join([key, *secondary]),
+                False,
+                f"NOT ALL for {key!r}",
+            )
+    for secondary_key in secondary:
+        check(secondary_key, False, f"secondary-only {secondary_key!r}")
+    for term in required_exact_spoiler_terms(project, entry):
+        check(term, True, f"exact spoiler term {term!r}")
+
+    if entry.get("spoiler_tier") == "conditional" and parent_entry:
+        normalized_primary = {normalized_text(value) for value in primary}
+        parent_keys = {
+            normalized_text(value) for value in parent_entry.get("keywords", [])
+        }
+        if normalized_primary & parent_keys:
+            if not normalized_primary <= parent_keys:
+                errors.append(
+                    f"{prefix} mixes safe-parent and distinct spoiler primary keys"
+                )
+            if not secondary:
+                errors.append(
+                    f"{prefix} parent-intent activation requires secondary keywords"
+                )
+        elif secondary:
+            errors.append(
+                f"{prefix} exact-name activation cannot use secondary keywords"
+            )
+    return errors
+
+
+def validate_risk_tests(entry, tests, prefix):
+    if entry.get("settings", {}).get("strategy") != "keyword":
+        if tests not in (None, []):
+            return [f"{prefix}.risk_tests must be empty for non-keyword entries"]
+        return []
+    if not isinstance(tests, list):
+        return [f"{prefix}.risk_tests must be an array"]
+    errors = []
+    seen = set()
+    for index, test in enumerate(tests):
+        label = f"{prefix}.risk_tests[{index}]"
+        if not isinstance(test, dict):
+            errors.append(f"{label} must be an object")
+            continue
+        if set(test) != {"text", "expected", "reason"}:
+            errors.append(f"{label} fields must be: expected, reason, text")
+        text = test.get("text")
+        if not isinstance(text, str) or not text.strip():
+            errors.append(f"{label}.text must be non-empty")
+            continue
+        normalized = normalized_text(text)
+        if normalized in seen:
+            errors.append(f"{prefix}.risk_tests contains duplicate text")
+        seen.add(normalized)
+        if generic_trigger_text(text):
+            errors.append(f"{label}.text must be a realistic entry-specific example")
+        expected = test.get("expected")
+        if not isinstance(expected, bool):
+            errors.append(f"{label}.expected must be boolean")
+            continue
+        if not isinstance(test.get("reason"), str) or generic_review_note(
+            test.get("reason", "")
+        ):
+            errors.append(f"{label}.reason must explain the ambiguity being tested")
+        actual = entry_activates(entry, text)
+        if actual != expected:
+            errors.append(
+                f"{label} expected activation={str(expected).lower()} but got "
+                f"{str(actual).lower()}"
+            )
+    return errors
+
+
 def validate_trigger_tests(project, entry, review, parent_entry, prefix):
     errors = []
     tests = review.get("trigger_tests")
@@ -1815,7 +2092,9 @@ def validate_trigger_tests(project, entry, review, parent_entry, prefix):
     return errors
 
 
-def validate_review(workspace, project, candidates, selection, selected, entries_by_id):
+def validate_review_v1(
+    workspace, project, candidates, selection, selected, entries_by_id
+):
     errors = []
     warnings = []
     stats = {"reviewed": 0}
@@ -2090,6 +2369,96 @@ def validate_review(workspace, project, candidates, selection, selected, entries
     return errors, warnings, stats
 
 
+def validate_review_v2(
+    workspace, project, candidates, selection, selected, entries_by_id
+):
+    errors = []
+    warnings = []
+    stats = {"reviewed": 0}
+    review = read_json(Path(workspace) / "review.json")
+
+    selection_review = review.get("selection")
+    if not isinstance(selection_review, dict):
+        errors.append("review.selection must be an object")
+    else:
+        expected_hash = selection_artifact_hash(project, candidates, selection)
+        if selection_review.get("artifact_hash") != expected_hash:
+            errors.append("review.selection is stale; rerun review-init")
+        status = selection_review.get("status")
+        if status != "pass":
+            errors.append("review.selection.status must be pass")
+        errors.extend(
+            validate_review_issues(
+                selection_review.get("issues"), status, "review.selection"
+            )
+        )
+
+    entry_reviews = review.get("entries")
+    if not isinstance(entry_reviews, list):
+        errors.append("review.entries must be an array")
+        entry_reviews = []
+    review_by_id = {}
+    for index, item in enumerate(entry_reviews):
+        if not isinstance(item, dict):
+            errors.append(f"review.entries[{index}] must be an object")
+            continue
+        entry_id = item.get("id")
+        if entry_id in review_by_id:
+            errors.append(f"Duplicate review entry id: {entry_id}")
+        review_by_id[entry_id] = item
+    expected_ids = {item.get("id") for item in selected if isinstance(item, dict)}
+    if set(review_by_id) != expected_ids:
+        errors.append("review.entries IDs must exactly match selected entry IDs")
+
+    for entry_id in sorted(expected_ids):
+        entry = entries_by_id.get(entry_id)
+        item = review_by_id.get(entry_id)
+        if not entry or not item:
+            continue
+        prefix = f"review entry {entry_id}"
+        before = len(errors)
+        if "source_evidence" not in entry:
+            errors.append(f"{prefix} requires draft source_evidence for review v2")
+        if item.get("artifact_hash") != entry_artifact_hash(workspace, project, entry):
+            errors.append(f"{prefix} is stale; rerun review-init")
+        status = item.get("status")
+        if status != "pass":
+            errors.append(f"{prefix}.status must be pass")
+        errors.extend(validate_review_issues(item.get("issues"), status, prefix))
+        parent_entry = entries_by_id.get(entry.get("spoiler_parent_id"))
+        errors.extend(
+            validate_generated_trigger_rules(project, entry, parent_entry, prefix)
+        )
+        errors.extend(validate_risk_tests(entry, item.get("risk_tests"), prefix))
+        if len(errors) == before:
+            stats["reviewed"] += 1
+    return errors, warnings, stats
+
+
+def validate_review(workspace, project, candidates, selection, selected, entries_by_id):
+    path = Path(workspace) / "review.json"
+    if not path.exists():
+        return (
+            ["Missing review.json; run review-init and complete independent review"],
+            [],
+            {"reviewed": 0},
+        )
+    try:
+        review = read_json(path)
+    except WorkflowError as exc:
+        return [str(exc)], [], {"reviewed": 0}
+    version = review.get("version") if isinstance(review, dict) else None
+    if version == 1:
+        return validate_review_v1(
+            workspace, project, candidates, selection, selected, entries_by_id
+        )
+    if version == 2:
+        return validate_review_v2(
+            workspace, project, candidates, selection, selected, entries_by_id
+        )
+    return ["review.json must be a version 1 or 2 object"], [], {"reviewed": 0}
+
+
 def validate_workspace(workspace, stage="auto"):
     workspace = Path(workspace).resolve()
     project, candidates, selection, errors, warnings, selected = load_selection_files(
@@ -2139,8 +2508,14 @@ def validate_workspace(workspace, stage="auto"):
         entry_errors, entry_warnings = validate_entry(project, item, entry)
         errors.extend(entry_errors)
         warnings.extend(entry_warnings)
+        errors.extend(validate_source_evidence(workspace, entry, f"entry {entry_id}"))
         entries.append(entry)
         entries_by_id[entry_id] = entry
+    evidence_count = sum("source_evidence" in entry for entry in entries)
+    if evidence_count not in {0, len(entries)}:
+        errors.append(
+            "Entries must either all use source_evidence for review v2 or all use the legacy review"
+        )
     for path in entry_paths:
         if path.stem not in selected_by_id:
             warnings.append(
@@ -2184,6 +2559,17 @@ def validate_workspace(workspace, stage="auto"):
             errors.append(
                 f"entry {entry.get('id', 'unknown')} reuses safe keys without "
                 "conditional secondary keywords"
+            )
+    if entries and evidence_count == len(entries):
+        for entry in entries:
+            parent_entry = entries_by_id.get(entry.get("spoiler_parent_id"))
+            errors.extend(
+                validate_generated_trigger_rules(
+                    project,
+                    entry,
+                    parent_entry,
+                    f"entry {entry.get('id', 'unknown')}",
+                )
             )
     if len(entries) >= 5:
         fingerprints = Counter(
@@ -2244,14 +2630,21 @@ def cmd_review_init(args):
         item["id"]: read_json(workspace / "entries" / f"{item['id']}.json")
         for item in selected
     }
+    review_version = (
+        2 if all("source_evidence" in entry for entry in entries.values()) else 1
+    )
     review_path = workspace / "review.json"
     previous = {}
     if review_path.exists() and not args.reset:
         previous = read_json(review_path)
-        if not isinstance(previous, dict):
+        if not isinstance(previous, dict) or previous.get("version") != review_version:
             previous = {}
 
-    selection_review = pending_selection_review(project, candidates, selection)
+    selection_review = (
+        pending_selection_review_v2(project, candidates, selection)
+        if review_version == 2
+        else pending_selection_review(project, candidates, selection)
+    )
     old_selection = previous.get("selection")
     if (
         isinstance(old_selection, dict)
@@ -2267,7 +2660,11 @@ def cmd_review_init(args):
     reviews = []
     preserved = 0
     for item in selected:
-        pending = pending_entry_review(workspace, project, entries[item["id"]])
+        pending = (
+            pending_entry_review_v2(workspace, project, entries[item["id"]])
+            if review_version == 2
+            else pending_entry_review(workspace, project, entries[item["id"]])
+        )
         old = old_entries.get(item["id"])
         if (
             isinstance(old, dict)
@@ -2279,10 +2676,15 @@ def cmd_review_init(args):
             reviews.append(pending)
     write_json(
         review_path,
-        {"version": 1, "selection": selection_review, "entries": reviews},
+        {
+            "version": review_version,
+            "selection": selection_review,
+            "entries": reviews,
+        },
     )
     print(
-        f"Initialized {review_path}: {preserved} preserved, "
+        f"Initialized review v{review_version} at {review_path}: "
+        f"{preserved} preserved, "
         f"{len(reviews) - preserved} pending."
     )
 
@@ -3067,7 +3469,97 @@ def cmd_self_test(_args):
                     project=str(workspace / "project.json"),
                 )
             )
-        overlapping = json.loads(json.dumps(conditional_entry))
+
+        safe_v2 = json.loads(json.dumps(safe_entry))
+        safe_v2["source_evidence"] = [
+            {
+                "page_id": 1,
+                "source_quote": safe_entry["content"],
+                "supports": [0, 1],
+            },
+            {
+                "page_id": 2,
+                "source_quote": content_sentences(safe_entry["content"])[1],
+                "supports": [1],
+            },
+        ]
+        conditional_v2 = json.loads(json.dumps(conditional_entry))
+        conditional_v2["source_evidence"] = [
+            {
+                "page_id": 1,
+                "source_quote": conditional_entry["content"],
+                "supports": [0, 1],
+            }
+        ]
+        write_json(workspace / "entries" / "soul-gem.json", safe_v2)
+        write_json(workspace / "entries" / "soul-gem-truth.json", conditional_v2)
+        with redirect_stdout(StringIO()):
+            cmd_review_init(argparse.Namespace(workspace=str(workspace), reset=False))
+        review_v2 = read_json(workspace / "review.json")
+        assert review_v2["version"] == 2
+        review_v2["selection"].update({"status": "pass", "issues": []})
+        for item in review_v2["entries"]:
+            item.update({"status": "pass", "issues": []})
+        conditional_review_v2 = next(
+            item for item in review_v2["entries"] if item["id"] == "soul-gem-truth"
+        )
+        conditional_review_v2["risk_tests"] = [
+            {
+                "text": "Soul Gem cleaning",
+                "expected": False,
+                "reason": "The safe parent name without reveal intent must remain inactive.",
+            }
+        ]
+        write_json(workspace / "review.json", review_v2)
+        review_errors, _, review_stats = validate_workspace(workspace, "review")
+        assert not review_errors, review_errors
+        assert review_stats["reviewed"] == 2
+        with patch.object(
+            sys.modules[__name__], "render_source", side_effect=fake_render_source
+        ):
+            with redirect_stdout(StringIO()):
+                cmd_pack(
+                    argparse.Namespace(
+                        workspace=str(workspace), output="packed-lorebook-v2.json"
+                    )
+                )
+        assert "source_evidence" not in (
+            workspace / "packed-lorebook-v2.json"
+        ).read_text(encoding="utf-8")
+        with redirect_stdout(StringIO()):
+            cmd_review_init(argparse.Namespace(workspace=str(workspace), reset=False))
+        assert read_json(workspace / "review.json") == review_v2
+
+        missing_coverage = json.loads(json.dumps(safe_v2))
+        for evidence in missing_coverage["source_evidence"]:
+            evidence["supports"] = [0]
+        write_json(workspace / "entries" / "soul-gem.json", missing_coverage)
+        evidence_errors, _, _ = validate_workspace(workspace, "entries")
+        assert any("does not cover sentence 1" in value for value in evidence_errors)
+        write_json(workspace / "entries" / "soul-gem.json", safe_v2)
+
+        unresolved = json.loads(json.dumps(review_v2))
+        unresolved["entries"][0]["issues"] = [
+            {
+                "category": "source_fidelity",
+                "message": "The first sentence overstates what the cited passage establishes.",
+                "targets": ["content:0"],
+            }
+        ]
+        write_json(workspace / "review.json", unresolved)
+        review_errors, _, _ = validate_workspace(workspace, "review")
+        assert any("issues must be empty" in value for value in review_errors)
+
+        bad_risk = json.loads(json.dumps(review_v2))
+        next(item for item in bad_risk["entries"] if item["id"] == "soul-gem-truth")[
+            "risk_tests"
+        ][0]["expected"] = True
+        write_json(workspace / "review.json", bad_risk)
+        review_errors, _, _ = validate_workspace(workspace, "review")
+        assert any("expected activation=true" in value for value in review_errors)
+        write_json(workspace / "review.json", review_v2)
+
+        overlapping = json.loads(json.dumps(conditional_v2))
         overlapping["secondary_keywords"] = []
         write_json(workspace / "entries" / "soul-gem-truth.json", overlapping)
         workspace_errors, _, _ = validate_workspace(workspace, "entries")

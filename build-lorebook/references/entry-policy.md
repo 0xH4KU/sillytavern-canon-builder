@@ -3,6 +3,7 @@
 ## Contents
 
 - [Entry Content](#entry-content)
+- [Draft Evidence](#draft-evidence)
 - [Relationship Enrichment](#relationship-enrichment)
 - [Spoiler Policy](#spoiler-policy)
 - [Conditional Spoiler Layers](#conditional-spoiler-layers)
@@ -20,6 +21,10 @@
 - Keep each sentence easy to map to one exact source-body quotation. Split compound sentences when their clauses require different evidence.
 - Keep title and memo distinct: `title` is the canonical concept name; `memo` is a concise operator label such as `[Main] Soul Gem`.
 - Use distinctive names and genuine aliases as keys. Do not use the franchise name or broad generic words as triggers.
+
+## Draft Evidence
+
+Add `source_evidence` to every new entry while the relevant source is already open. Each record contains `page_id`, an exact article-body `source_quote`, and zero-based `supports` indexes into the entry's content sentences. One passage may support several related sentences. Cover every sentence and cite every declared source page. This field is validated with the draft and omitted from the packed lorebook.
 
 ## Relationship Enrichment
 
@@ -85,6 +90,18 @@ See the current SillyTavern World Info documentation when uncertain: <https://do
   "importance": "core",
   "continuity": "Main anime",
   "source_page_ids": [123, 124],
+  "source_evidence": [
+    {
+      "page_id": 123,
+      "source_quote": "An exact article-body passage supporting the entry's first sentence.",
+      "supports": [0]
+    },
+    {
+      "page_id": 124,
+      "source_quote": "An exact article-body passage supporting the second sentence.",
+      "supports": [1]
+    }
+  ],
   "spoiler_tier": "safe",
   "spoiler_review": {
     "policy": "balanced",
@@ -122,6 +139,13 @@ A conditional child that reuses the safe keys must add a reveal-intent filter:
   "importance": "recommended",
   "continuity": "Main anime",
   "source_page_ids": [123],
+  "source_evidence": [
+    {
+      "page_id": 123,
+      "source_quote": "An exact reveal-bearing article passage supporting this entry.",
+      "supports": [0]
+    }
+  ],
   "spoiler_tier": "conditional",
   "spoiler_parent_id": "soul-gem",
   "spoiler_review": {
