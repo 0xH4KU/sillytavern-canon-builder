@@ -24,8 +24,8 @@ Apply the first three dimensions to every card and the last two only to sandbox 
 - **Novelty** (`novelty`): Judge how clearly the core premise differs from common cards in the same lane. A familiar canon or trope can pass through a distinctive relationship position, constraint, interaction engine, or starting state; a setting reskin alone is not differentiation.
 - **Clarity** (`clarity`): Judge how quickly the user can understand the setup, their role, the relevant relationship, and the expected interaction pattern from the permanent fields and opening.
 - **Execution** (`execution`): Judge whether the card's construction actually delivers its stated purpose and interaction type. Use this category for an overall premise-to-implementation mismatch, not as a catch-all for a narrower defect.
-- **Tension** (`tension`, sandbox only): Judge whether startup presents an immediate unresolved pressure, conflict, desire, or stake strong enough to invite action. Tension need not mean combat, danger, or world-scale stakes.
-- **Depth** (`depth`, sandbox only): Judge whether the design supports materially different pathways, evolving relationships or state, and sustained replay rather than one premise repeated. Lore volume and token count are not depth by themselves.
+- **Tension** (`tension`): Judge whether startup presents an immediate unresolved pressure, conflict, desire, or stake strong enough to invite action. Tension need not mean combat, danger, or world-scale stakes.
+- **Depth** (`depth`): Judge whether the design supports materially different pathways, evolving relationships or state, and sustained replay rather than one premise repeated. Lore volume and token count are not depth by themselves.
 
 ## Draft Evidence
 
