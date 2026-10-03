@@ -32,7 +32,7 @@ python3 "$LOREBOOK_CLI" init <work-directory> \
   --spoiler balanced
 ```
 
-3. Edit `project.json` before discovery. Record the requested scope, output language, named continuities, required titles, coverage minimums, spoiler blocklist, relationship mode, and hard candidate/entry limits. For every scope, add one `scope_requirements` record with its continuities, premise-safe required titles, and per-type minimums. Generate this contract from the user's request, then show the compact project summary once; do not make the user classify every page.
+3. Edit `project.json` before discovery. Record the requested scope, output language, named continuities, required titles, coverage minimums, spoiler blocklist, relationship mode, and hard candidate/entry limits. Use `purpose` to state whether this is a reusable world reference or an explicitly requested period-limited book; default to the former. For every scope, add one `scope_requirements` record with its continuities, premise-safe required titles, and per-type minimums. Generate this contract from the user's request, then show the compact project summary once; do not make the user classify every page.
 
 ## Discover And Select
 
@@ -115,7 +115,9 @@ Packing re-fetches every recorded Fandom revision and refuses output when the ca
 
 The output is `<work-directory>/lorebook.json`. Report selected, core, generated, reviewed, missing, warning, and manual-review counts.
 
-Inside the SillyTavern Canon Builder plugin, `build-character-card` may consume this reviewed workspace and embed an explicit subset of entry IDs as a Character Card V2 `character_book`. Keep this workspace as the source of truth; do not duplicate or rewrite world facts in the character card.
+Inside the SillyTavern Canon Builder plugin, `build-character-card` may consume this reviewed workspace and embed an explicit subset of entry IDs as a Character Card V2 `character_book`. Keep this workspace as the source of truth for sourced canon; do not duplicate world facts in the character card. The card defines its opening, while the session records subsequent state and divergences. Check the chosen subset for temporal and knowledge compatibility; reviewed entries are not automatically compatible with every card. Use the temporal applicability rules in [entry-policy.md](references/entry-policy.md) even for standalone books.
+
+For a companion book, select the places, actors, rules and resources needed to make the card's main thread actionable. The opening must explain its immediate problem without waiting for retrieval; the lorebook supplies reference and discoverable detail, not a fixed sequence of compulsory events.
 
 Audit an existing SillyTavern lorebook without rebuilding it:
 

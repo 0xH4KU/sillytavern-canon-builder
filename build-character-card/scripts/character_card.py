@@ -69,7 +69,11 @@ PROBE_CATEGORIES = (
 VOICE_DIMENSIONS = {"diction", "cadence", "subtext", "narration"}
 VOICE_DIMENSION_ORDER = ("diction", "cadence", "subtext", "narration")
 CAST_PROFILE_FIELDS = ("psychology", "defense", "relationships", "voice")
-CAST_PROFILE_MIN_CHARS = 100
+SAMPLE_LINES_MIN = 2
+SAMPLE_LINES_MAX = 6
+SAMPLE_LINE_MAX_CHARS = 220
+RELATIONSHIP_REQUIRED_FIELDS = ("name", "stance", "tension")
+RELATIONSHIP_OPTIONAL_FIELDS = ("knowledge", "power")
 CARD_STRING_FIELDS = (
     "name",
     "description",
@@ -282,8 +286,9 @@ def card_evidence_targets(card, project, planned_sources):
     for index, relationship in enumerate(card["portrayal"]["relationships"]):
         targets[f"relationship:{index}"] = {
             "text": " ".join(
-                relationship[field]
+                relationship.get(field, "")
                 for field in ("stance", "knowledge", "power", "tension")
+                if nonempty_string(relationship.get(field))
             ),
             "allowed_bases": {
                 "sourced" if relationship["basis"] == "canon" else "authored"
@@ -971,6 +976,27 @@ def validate_string_object(value, fields, prefix, errors):
             errors.append(f"{prefix}.{field} must be a non-empty string")
 
 
+def validate_sample_lines(container, prefix, errors):
+    """Require short demonstrated lines plus one concrete 'never' rule."""
+    samples = container.get("sample_lines")
+    if not valid_string_list(samples, SAMPLE_LINES_MIN, SAMPLE_LINES_MAX):
+        errors.append(
+            f"{prefix}.sample_lines must contain "
+            f"{SAMPLE_LINES_MIN}..{SAMPLE_LINES_MAX} strings"
+        )
+    else:
+        if not unique_strings(samples):
+            errors.append(f"{prefix}.sample_lines contains duplicates")
+        for index, line in enumerate(samples):
+            if len(line.strip()) > SAMPLE_LINE_MAX_CHARS:
+                errors.append(
+                    f"{prefix}.sample_lines[{index}] exceeds "
+                    f"{SAMPLE_LINE_MAX_CHARS} characters; samples are lines, not monologues"
+                )
+    if not nonempty_string(container.get("never")):
+        errors.append(f"{prefix}.never must be a non-empty string")
+
+
 def compiled_card_data(project, card):
     """Compile the draft-only portrayal contract into standard V2 prompt fields."""
     data = deepcopy(card.get("data", {}))
@@ -1014,19 +1040,32 @@ def compiled_card_data(project, card):
         )
         personality_sections.append(f"[{title}]\n" + "\n".join(engine_lines))
 
+    def sample_line_text(value):
+        if not isinstance(value, list):
+            return ""
+        return " / ".join(
+            f'"{line.strip()}"' for line in value if nonempty_string(line)
+        )
+
     profiles = portrayal.get("cast_profiles")
     if isinstance(profiles, list):
         lines = []
         for profile in profiles:
             if not isinstance(profile, dict):
                 continue
-            lines.append(
+            block = (
                 f"- {profile.get('name', '')}\n"
                 f"  Psychology: {profile.get('psychology', '')}\n"
                 f"  Emotional defense: {profile.get('defense', '')}\n"
                 f"  Relationship differences: {profile.get('relationships', '')}\n"
                 f"  Voice: {profile.get('voice', '')}"
             )
+            samples = sample_line_text(profile.get("sample_lines"))
+            if samples:
+                block += f"\n  Sounds like: {samples}"
+            if nonempty_string(profile.get("never")):
+                block += f"\n  Never: {profile['never']}"
+            lines.append(block)
         if lines:
             personality_sections.append("[Core cast profiles]\n" + "\n".join(lines))
 
@@ -1050,13 +1089,16 @@ def compiled_card_data(project, card):
         for relationship in relationships:
             if not isinstance(relationship, dict):
                 continue
-            lines.append(
-                f"- {relationship.get('name', '')}\n"
-                f"  Stance: {relationship.get('stance', '')}\n"
-                f"  Knowledge: {relationship.get('knowledge', '')}\n"
-                f"  Power: {relationship.get('power', '')}\n"
-                f"  Tension: {relationship.get('tension', '')}"
-            )
+            block = [f"- {relationship.get('name', '')}"]
+            for field, label in (
+                ("stance", "Stance"),
+                ("knowledge", "Knowledge"),
+                ("power", "Power"),
+                ("tension", "Tension"),
+            ):
+                if nonempty_string(relationship.get(field)):
+                    block.append(f"  {label}: {relationship[field]}")
+            lines.append("\n".join(block))
         if lines:
             personality_sections.append("[Relationships]\n" + "\n".join(lines))
 
@@ -1068,6 +1110,11 @@ def compiled_card_data(project, card):
             f"Subtext: {voice.get('subtext', '')}",
             f"Narration: {voice.get('narration', '')}",
         ]
+        samples = sample_line_text(voice.get("sample_lines"))
+        if samples:
+            voice_lines.append(f"Sounds like: {samples}")
+        if nonempty_string(voice.get("never")):
+            voice_lines.append(f"Never: {voice['never']}")
         personality_sections.append("[Voice]\n" + "\n".join(voice_lines))
 
     if personality_sections:
@@ -1089,6 +1136,297 @@ def permanent_chars(data):
         for field in PERMANENT_FIELDS
         if isinstance(data.get(field), str)
     )
+
+
+# ---------------------------------------------------------------------------
+# Prose lint: deterministic detectors for habits that make cards read as
+# machine-written or that take control away from the user. Semantic quality
+# still belongs to the reviewer; these checks only catch observable patterns.
+# ---------------------------------------------------------------------------
+
+SLOP_PATTERNS = (
+    ("knuckles whitening", r"\bknuckles?\b[^.!?\n]{0,40}\b(?:white|bloodless|blanch\w*)|\bwhite-knuckled\b"),
+    ("a heartbeat", r"\b(?:for|in|within|after) a (?:single )?heartbeat\b|\ba heartbeat (?:away|later)\b"),
+    ("a fraction of an inch/second", r"\bfraction of an? (?:inch|second|millimet(?:er|re))\b"),
+    ("razor-sharp / razor's edge", r"\brazor(?:-sharp|'s edge|-thin| edge)\b"),
+    ("breathtaking", r"\bbreathtaking\b"),
+    ("intoxicating", r"\bintoxicating\b"),
+    ("silk and venom/steel", r"\bsilk and (?:venom|steel)\b"),
+    ("voice cracking/breaking", r"\bvoice (?:crack|break)(?:s|ed|ing)?\b|\bvoice (?:broke|cracked)\b"),
+    ("shiver down the spine", r"\b(?:shiver|chill)s? (?:runs?|ran|went|crawl\w*) down\b"),
+    ("breath they didn't know they held", r"\bbreath (?:she|he|you|they) (?:didn't|did not) know\b"),
+    ("smile doesn't reach the eyes", r"\b(?:doesn't|does not|didn't|never) reach(?:es|ed)? (?:her|his|their) eyes\b"),
+    ("smirk", r"\bsmirk\w*\b"),
+    ("palpable", r"\bpalpable\b"),
+    ("testament to", r"\btestament to\b"),
+    ("unwavering / unyielding", r"\bun(?:wavering|yielding)\b"),
+    ("barely above a whisper", r"\bbarely above a whisper\b"),
+    ("the air grows thick", r"\bair (?:is|was|grows|grew|hangs|hung) (?:thick|heavy)\b"),
+    ("can't help but", r"\b(?:can't|cannot|couldn't) help but\b"),
+    ("ozone", r"\bozone\b"),
+    ("predatory", r"\bpredatory\b"),
+    ("指節發白", r"指[節节](?:都)?(?:泛|發|发)白"),
+    ("心跳漏了一拍", r"心跳(?:漏了|慢了)半?一?拍"),
+    ("不易察覺", r"不易察[覺觉]"),
+    ("嘴角勾起", r"嘴角(?:微微)?(?:勾起|上揚|上扬)"),
+    ("眼底閃過", r"眼[底中](?:閃過|闪过)"),
+    ("空氣凝固", r"空[氣气](?:彷彿|仿佛|似乎)?(?:凝固|凝結|凝结)"),
+    ("一絲玩味", r"一[絲丝](?:玩味|狡黠|戲謔|戏谑)"),
+    ("喉結滾動", r"喉[結结](?:滾動|滚动)"),
+    ("低沉磁性的嗓音", r"(?:低沉|磁性)的(?:嗓音|聲音|声音)"),
+    ("不容置疑", r"不容(?:置疑|拒絕|拒绝)"),
+)
+SLOP_ERROR_THRESHOLD = 3
+PUPPET_PATTERNS = (
+    r"\byou (?:flinch|freeze|froze|feel|felt|realize|realise|gasp|shiver|blush|nod|agree|decide|wince|tremble|swallow|stammer|can't help|cannot help|find yourself|found yourself|instinctively|reflexively|deliberately|had deliberately|chose to|decided)\w*\b",
+    r"\byour (?:heart|pulse|breath|stomach) (?:\w+ )?(?:race[sd]?|pound(?:s|ed)?|skip(?:s|ped)?|catch(?:es)?|caught|hitch(?:es|ed)?|sinks?|sank|lurch\w*|tighten\w*)\b",
+    r"\byour (?:trembling|shaking|sweating|clammy) (?:hand|hands|fingers|voice)\b",
+    r"\byour (?:cheeks|face) (?:flush|burn|redden)\w*\b",
+    r"你(?:不禁|不由得|忍不住|下意識|下意识|本能地|感到|感覺到|感觉到|覺得|觉得|心頭|心头|心跳|倒吸|渾身|浑身|臉頰|脸颊|決定|决定)",
+)
+WEAPON_PATTERN = (
+    r"\b(?:blade|sword|cutlass|saber|sabre|spear|lance|gun|pistol|rifle|musket|muzzle|"
+    r"barrel|wand|staff|knife|dagger|kukri|crossbow|arrow|gatling|cannon|claw)s?\b"
+    r"[^.!?\n]*?\b(?:at|toward|towards|against|into|for)\b(?:\s+[\w'-]+){0,4}?\s+(?:you|your)\b"
+    r"|(?:刀|劍|剑|槍|枪|矛|杖|刃|弓|箭|炮|匕首)[^。！？\n]{0,16}"
+    r"(?:指向|指著|指着|對準|对准|抵住|抵在|架在|刺向)[^。！？\n]{0,6}你"
+)
+INTERVIEW_PATTERN = (
+    r"\b(?:why do you|why did you|how do you|how can you|how could you|is it true|"
+    r"are you really|are you certain|are you sure you|is there truly|do you really|"
+    r"what do you think (?:of|about)|tell me about (?:your|yourself)|what (?:is|was) your)\b"
+    r"|為什麼你|为什么你|你為什麼|你为什么|你真的|是真的嗎|是真的吗|你怎麼看|你怎么看|跟我說說你|跟我说说你"
+)
+_NUMBER_WORDS = (
+    r"(?:\d+(?:[.,]\d+)?|(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
+    r"fifteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred)"
+    r"(?:[- ](?:one|two|three|four|five|six|seven|eight|nine|hundred|thousand))*)"
+)
+PRECISION_PATTERN = (
+    r"\b" + _NUMBER_WORDS + r"\s?(?:%|percent|km/h|mph|mm|cm|millimet(?:er|re)s?|"
+    r"met(?:er|re)s?|kilomet(?:er|re)s?|seconds?|tons?|inch(?:es)?|paces|degrees)(?![A-Za-z])"
+    r"|\d+(?:\.\d+)?\s?(?:%|％|公里|公尺|毫米|秒|噸|吨)|百分之[一二三四五六七八九十百\d]+"
+)
+SFX_WORD = (
+    r"(?:snap|crack|thud|bang|boom|crash|clang|clank|whoosh|creak|scrape|click|hiss+|"
+    r"whir+|thung|bam|wham|thwack|sizzle|hs+|kra+k|ka-?boom|zing|shink|schwing)"
+)
+SFX_CJK = set("砰轟轰咚嘩哗噹当喀咔嚓嘶呼啪鏘锵嗡嗖咻")
+COPY_SHINGLE_WORDS = 10
+
+
+def strip_dialogue(text):
+    return re.sub(r'"[^"\n]*"|“[^”\n]*”|「[^」\n]*」|『[^』\n]*』', " ", text)
+
+
+def character_example_text(value):
+    """Return only the {{char}} portions of mes_example."""
+    if not isinstance(value, str):
+        return ""
+    rows = []
+    speaker = None
+    for line in value.splitlines():
+        stripped = line.strip()
+        if stripped == "<START>":
+            speaker = None
+            continue
+        if stripped.startswith("{{user}}:"):
+            speaker = "user"
+            continue
+        if stripped.startswith("{{char}}:"):
+            speaker = "char"
+            line = stripped[len("{{char}}:") :]
+        if speaker == "char":
+            rows.append(line)
+    return "\n".join(rows)
+
+
+def example_user_lines(value):
+    if not isinstance(value, str):
+        return []
+    blocks = re.split(r"(?m)^[ \t]*<START>[ \t]*$", value)
+    result = []
+    for block in blocks:
+        users = re.findall(r"(?m)^[ \t]*\{\{user\}\}:(.*)$", block)
+        if users:
+            result.append(" ".join(users))
+    return result
+
+
+def is_sfx_line(line):
+    text = line.strip().strip("*_~ ").strip()
+    if not text or len(text) > 48 or text[0] in "\"“「『'":
+        return False
+    cjk = [character for character in text if "\u3400" <= character <= "\u9fff"]
+    if cjk and all(character in SFX_CJK for character in cjk):
+        return len(re.sub(r"[\W_]", "", text)) == len(cjk)
+    letters = re.sub(r"[^A-Za-z]", "", text)
+    if len(letters) < 3:
+        return False
+    if letters.isupper() and len(text.split()) <= 4:
+        return True
+    words = re.findall(r"[A-Za-z]+", text.casefold())
+    return bool(words) and all(re.fullmatch(SFX_WORD, word) for word in words)
+
+
+def source_shingles(source_texts, size=COPY_SHINGLE_WORDS):
+    shingles = set()
+    for text in source_texts:
+        words = re.findall(r"[a-z0-9']+", source_body(text).casefold())
+        for index in range(len(words) - size + 1):
+            shingles.add(tuple(words[index : index + size]))
+    return shingles
+
+
+def lint_card_prose(data, source_texts=()):
+    """Return (errors, warnings) for observable prose and agency defects."""
+    errors = []
+    warnings = []
+    greetings = []
+    if nonempty_string(data.get("first_mes")):
+        greetings.append(("first_mes", data["first_mes"]))
+    for index, value in enumerate(data.get("alternate_greetings") or []):
+        if nonempty_string(value):
+            greetings.append((f"alternate_greetings[{index}]", value))
+    examples = character_example_text(data.get("mes_example", ""))
+    creative = [(label, text) for label, text in greetings]
+    if examples:
+        creative.append(("mes_example", examples))
+    permanent = [
+        (field, data[field])
+        for field in PERMANENT_FIELDS
+        if nonempty_string(data.get(field))
+    ]
+
+    # 1. Writing the user's reactions, sensations, or past decisions.
+    for label, text in creative:
+        narration = strip_dialogue(text)
+        hits = []
+        for pattern in PUPPET_PATTERNS:
+            hits.extend(
+                match.group(0) for match in re.finditer(pattern, narration, re.I)
+            )
+        if hits:
+            errors.append(
+                f"prose: {label} narrates {{{{user}}}}'s reactions or decisions: "
+                + ", ".join(sorted(set(hits))[:4])
+            )
+
+    # 2. Stand-alone sound-effect lines.
+    for label, text in creative:
+        sfx = [line.strip() for line in text.splitlines() if is_sfx_line(line)]
+        if sfx:
+            errors.append(
+                f"prose: {label} uses stand-alone sound-effect lines: "
+                + ", ".join(sfx[:4])
+            )
+
+    # 3. Weapon-pointed-at-user openings.
+    threatened = []
+    for label, text in greetings:
+        if re.search(WEAPON_PATTERN, strip_dialogue(text).replace("*", ""), re.I):
+            threatened.append(label)
+    if "first_mes" in threatened:
+        errors.append(
+            "prose: first_mes opens with a weapon aimed at {{user}}; establish stakes "
+            "and a player intervention point without this forced confrontation"
+        )
+    alternate_threats = [label for label in threatened if label != "first_mes"]
+    if len(alternate_threats) > 1:
+        errors.append(
+            "prose: more than one alternate greeting aims a weapon at {{user}}: "
+            + ", ".join(alternate_threats)
+        )
+    elif alternate_threats:
+        warnings.append(
+            f"prose: {alternate_threats[0]} aims a weapon at {{{{user}}}}; verify player agency in this threatened opening"
+        )
+
+    # 4. Fake precision in greetings.
+    for label, text in greetings:
+        precise = [match.group(0) for match in re.finditer(PRECISION_PATTERN, text, re.I)]
+        if len(precise) >= 3:
+            errors.append(
+                f"prose: {label} uses {len(precise)} precise measurements "
+                f"({', '.join(precise[:4])}); replace numbers with sensory or behavioral detail"
+            )
+
+    # 5. Closing on an explicit either/or ultimatum.
+    for label, text in greetings:
+        tail = "\n".join(
+            paragraph for paragraph in text.strip().split("\n") if paragraph.strip()
+        ).split("\n")[-2:]
+        questions = re.findall(r"[^.!?。！？\n]*[?？]", "\n".join(tail))
+        if questions and re.search(r"\bor\b|還是|还是", questions[-1], re.I):
+            warnings.append(
+                f"prose: {label} ends on an either/or question; end on an action or line "
+                "that invites a response without listing the choices"
+            )
+
+    # 6. Interview-style examples.
+    user_lines = example_user_lines(data.get("mes_example", ""))
+    interview = [line for line in user_lines if re.search(INTERVIEW_PATTERN, line, re.I)]
+    if len(interview) >= 2 and len(interview) * 2 >= len(user_lines):
+        errors.append(
+            f"prose: {len(interview)} of {len(user_lines)} example blocks interview the "
+            "character about their own traits; write mid-scene exchanges instead"
+        )
+
+    # 7. Machine-prose phrase density across every prompt field.
+    scan = [(label, text) for label, text in creative + permanent]
+    counts = {}
+    for name, pattern in SLOP_PATTERNS:
+        total = sum(len(re.findall(pattern, text, re.I)) for _, text in scan)
+        if total:
+            counts[name] = total
+    total_hits = sum(counts.values())
+    if counts:
+        summary = ", ".join(
+            f"{name}×{count}" for name, count in sorted(counts.items(), key=lambda item: -item[1])
+        )
+        if total_hits >= SLOP_ERROR_THRESHOLD:
+            errors.append(
+                f"prose: {total_hits} stock machine-prose phrases ({summary}); rewrite them "
+                "as specific observed behavior, see references/prose-style.md"
+            )
+        else:
+            warnings.append(f"prose: stock phrases present ({summary})")
+
+    # 8. Shouted directives inside permanent fields.
+    for label, text in permanent:
+        shouted = re.findall(r"\b[A-Z]{4,}(?:[\s&]+[A-Z]{4,})+\b", text)
+        if shouted:
+            warnings.append(
+                f"prose: {label} contains shouted directives ({', '.join(shouted[:3])}); "
+                "state a rule once in plain language"
+            )
+
+    # 9. Encyclopedic register copied from sources.
+    shingles = source_shingles(source_texts) if source_texts else set()
+    if shingles:
+        copied = []
+        for field in ("description", "personality", "scenario"):
+            for sentence in content_sentences(data.get(field, "")):
+                words = re.findall(r"[a-z0-9']+", sentence.casefold())
+                if any(
+                    tuple(words[index : index + COPY_SHINGLE_WORDS]) in shingles
+                    for index in range(len(words) - COPY_SHINGLE_WORDS + 1)
+                ):
+                    copied.append(f"{field}: {sentence[:90]}")
+        if copied:
+            errors.append(
+                f"prose: {len(copied)} permanent sentence(s) copy source wording verbatim; "
+                "evidence proves facts, the card must restate them as behavior. e.g. "
+                + " | ".join(copied[:3])
+            )
+    return errors, warnings
+
+
+def workspace_source_texts(workspace):
+    directory = Path(workspace) / "sources"
+    if not directory.is_dir():
+        return []
+    return [path.read_text(encoding="utf-8") for path in sorted(directory.glob("*.txt"))]
 
 
 def validate_card(project, planned_sources, card):
@@ -1234,24 +1572,20 @@ def validate_card(project, planned_sources, card):
         if not isinstance(relationship, dict):
             errors.append(f"{prefix} must be an object")
             continue
-        expected = {
-            "name",
-            "stance",
-            "knowledge",
-            "power",
-            "tension",
-            "basis",
-            "source_ids",
-        }
+        required = {*RELATIONSHIP_REQUIRED_FIELDS, "basis", "source_ids"}
+        expected = required | set(RELATIONSHIP_OPTIONAL_FIELDS)
         unknown = sorted(set(relationship) - expected)
-        missing = sorted(expected - set(relationship))
+        missing = sorted(required - set(relationship))
         if unknown:
             errors.append(f"{prefix} has unknown fields: {', '.join(unknown)}")
         if missing:
             errors.append(f"{prefix} is missing fields: {', '.join(missing)}")
-        for field in ("name", "stance", "knowledge", "power", "tension"):
+        for field in RELATIONSHIP_REQUIRED_FIELDS:
             if not nonempty_string(relationship.get(field)):
                 errors.append(f"{prefix}.{field} must be a non-empty string")
+        for field in RELATIONSHIP_OPTIONAL_FIELDS:
+            if field in relationship and not isinstance(relationship[field], str):
+                errors.append(f"{prefix}.{field} must be a string when present")
         name = relationship.get("name")
         if isinstance(name, str):
             normalized_name = name.casefold()
@@ -1297,7 +1631,7 @@ def validate_card(project, planned_sources, card):
         if not isinstance(profile, dict):
             errors.append(f"{prefix} must be an object")
             continue
-        expected = {"name", "source_ids", *CAST_PROFILE_FIELDS}
+        expected = {"name", "source_ids", "sample_lines", "never", *CAST_PROFILE_FIELDS}
         unknown = sorted(set(profile) - expected)
         missing = sorted(expected - set(profile))
         if unknown:
@@ -1312,15 +1646,9 @@ def validate_card(project, planned_sources, card):
         else:
             profile_names.add(name.casefold())
         for field in CAST_PROFILE_FIELDS:
-            value = profile.get(field)
-            if (
-                not nonempty_string(value)
-                or len(value.strip()) < CAST_PROFILE_MIN_CHARS
-            ):
-                errors.append(
-                    f"{prefix}.{field} must contain at least "
-                    f"{CAST_PROFILE_MIN_CHARS} characters"
-                )
+            if not nonempty_string(profile.get(field)):
+                errors.append(f"{prefix}.{field} must be a non-empty string")
+        validate_sample_lines(profile, prefix, errors)
         source_ids = profile.get("source_ids")
         if not valid_string_list(source_ids, 1, 8):
             errors.append(f"{prefix}.source_ids must contain 1..8 strings")
@@ -1332,12 +1660,17 @@ def validate_card(project, planned_sources, card):
             errors.append(
                 f"{prefix}.source_ids is unknown: {', '.join(unknown_sources)}"
             )
-    validate_string_object(
-        portrayal.get("voice"),
-        ("diction", "cadence", "subtext", "narration"),
-        "card.portrayal.voice",
-        errors,
-    )
+    voice = portrayal.get("voice")
+    if isinstance(voice, dict):
+        validate_string_object(
+            {key: voice.get(key) for key in voice if key not in ("sample_lines", "never")},
+            ("diction", "cadence", "subtext", "narration"),
+            "card.portrayal.voice",
+            errors,
+        )
+        validate_sample_lines(voice, "card.portrayal.voice", errors)
+    else:
+        errors.append("card.portrayal.voice must be an object")
     hooks = portrayal.get("interaction_hooks")
     if not valid_string_list(hooks, 2, 8):
         errors.append("card.portrayal.interaction_hooks must contain 2..8 strings")
@@ -1359,14 +1692,12 @@ def validate_card(project, planned_sources, card):
             "compiled permanent card fields use "
             f"{compiled_permanent} characters, exceeding {maximum}"
         )
-    if project.get("mode", "single-character") == "ensemble-rpg" and is_int(maximum):
-        minimum = min(6000, maximum // 2)
-        if compiled_permanent < minimum:
-            errors.append(
-                "ensemble-rpg compiled permanent fields use "
-                f"{compiled_permanent} characters; expected at least {minimum} "
-                "for cast, relationship, and director depth"
-            )
+    if is_int(maximum) and compiled_permanent > maximum * 0.85:
+        warnings.append(
+            "compiled permanent fields use "
+            f"{compiled_permanent} of {maximum} characters; cut repeated "
+            "facts and restated rules before spending the remaining budget"
+        )
     if project.get("spoiler_policy") != "full":
         combined = "\n".join(
             compiled_data.get(field, "")
@@ -1971,6 +2302,11 @@ def validate_workspace(workspace, stage="auto"):
     stats.update(card_stats)
     if not card_errors:
         errors.extend(validate_card_evidence(workspace, project, planned_sources, card))
+        lint_errors, lint_warnings = lint_card_prose(
+            compiled_card_data(project, card), workspace_source_texts(workspace)
+        )
+        errors.extend(lint_errors)
+        warnings.extend(lint_warnings)
     linked = None
     if not errors:
         try:
@@ -2009,7 +2345,7 @@ def cmd_init(args):
     if not nonempty_string(args.character) or not nonempty_string(args.language):
         raise WorkflowError("character and language must be non-empty")
     max_permanent_chars = args.max_permanent_chars or (
-        16000 if args.mode == "ensemble-rpg" else 8000
+        10000 if args.mode == "ensemble-rpg" else 6000
     )
     limits = (
         args.max_sources,
@@ -2212,12 +2548,38 @@ def cmd_draft_init(args):
                 "cadence": "",
                 "subtext": "",
                 "narration": "",
+                "sample_lines": [],
+                "never": "",
             },
             "interaction_hooks": [],
         },
     }
     write_json(path, card)
     print(f"Initialized {path}")
+
+
+def cmd_lint(args):
+    path = Path(args.path).resolve()
+    if path.is_dir():
+        workspace = path
+        card_path = workspace / "card.json"
+        if card_path.exists():
+            data = compiled_card_data(load_project(workspace), read_json(card_path))
+        elif (workspace / "character.json").exists():
+            data = read_json(workspace / "character.json").get("data", {})
+        else:
+            raise WorkflowError(f"No card.json or character.json in {workspace}")
+    elif path.is_file():
+        workspace = path.parent
+        loaded = read_json(path)
+        data = loaded.get("data", loaded) if isinstance(loaded, dict) else {}
+    else:
+        raise WorkflowError(f"Not found: {path}")
+    errors, warnings = lint_card_prose(data, workspace_source_texts(workspace))
+    print_issues(errors, warnings)
+    if errors:
+        raise WorkflowError(f"Prose lint failed with {len(errors)} error(s)")
+    print("Prose lint passed.")
 
 
 def cmd_validate(args):
@@ -2468,6 +2830,11 @@ def self_test_card():
                 "cadence": "Short directives under pressure, followed by one dry qualification.",
                 "subtext": "Offers practical protection instead of naming concern or trust.",
                 "narration": "Third-person present physical action with compact environmental detail.",
+                "sample_lines": [
+                    "Lamp. Higher. Thank you.",
+                    "If the roof goes, run left. Don't wait for me to say it twice.",
+                ],
+                "never": "Says 'I trust you' or apologizes in words; trust shows up as a handed-over tool.",
             },
             "interaction_hooks": [
                 "Repair the relay before backup power fails.",
@@ -2500,9 +2867,17 @@ def cmd_self_test(_args):
             ],
         }
         card = self_test_card()
-        source_lines = []
-        source_lines.extend(content_sentences(card["data"]["description"]))
-        source_lines.extend(content_sentences(card["data"]["personality"]))
+        card_sentences = content_sentences(card["data"]["description"]) + content_sentences(
+            card["data"]["personality"]
+        )
+        paraphrases = [
+            "As a field engineer, Example is known for gray eyes, a weathered coat, and always checking every exit.",
+            "Example carries a burn scar on the left hand, yet that hand stays steady through delicate repair work.",
+            "Example hopes to restore the relay ahead of the storm and is wary of trusting a partner since an earlier mission failed.",
+            "Under pressure Example asks clipped, practical questions and later mends conflict with concrete help rather than apologies.",
+        ]
+        claim_quotes = dict(zip(card_sentences, paraphrases))
+        source_lines = list(paraphrases)
         source_lines.extend(
             [
                 "Mara assigns missions, while Example controls how the work is performed in the field.",
@@ -2579,7 +2954,7 @@ def cmd_self_test(_args):
                         "classification": "sourced",
                         "verdict": "supported",
                         "source_id": "main",
-                        "source_quote": item["claim"],
+                        "source_quote": claim_quotes[item["claim"]],
                         "notes": "The cached sentence directly supports the complete card statement in this field.",
                     }
                 )
@@ -2642,17 +3017,13 @@ def cmd_self_test(_args):
             {
                 "basis": "sourced",
                 "source_id": "main",
-                "source_quote": "\n\n".join(
-                    content_sentences(card["data"]["description"])
-                ),
+                "source_quote": "\n\n".join(paraphrases[:2]),
                 "supports": ["description:0", "description:1"],
             },
             {
                 "basis": "sourced",
                 "source_id": "main",
-                "source_quote": "\n\n".join(
-                    content_sentences(card["data"]["personality"])
-                ),
+                "source_quote": "\n\n".join(paraphrases[2:4]),
                 "supports": ["personality:0", "personality:1"],
             },
             {
@@ -2734,6 +3105,8 @@ def cmd_self_test(_args):
                 "defense": "Example turns fear into technical control, checks exits, and narrows conversation to the next repair step; dependable action softens that vigilance before verbal reassurance does.",
                 "relationships": "Example treats a new partner as unproven, respects Mara's mission authority while resisting interference in field decisions, and changes trust only after observed choices.",
                 "voice": "Example uses clipped technical directives, concrete risk estimates, and dry practical judgments; concern appears through offered tools and protection rather than sentimental explanation.",
+                "sample_lines": ["Hold that. No, the other end.", "We can argue after the power's back."],
+                "never": "Names a feeling out loud.",
                 "source_ids": ["main"],
             },
             {
@@ -2742,6 +3115,8 @@ def cmd_self_test(_args):
                 "defense": "Mara responds to uncertainty by assigning explicit missions and holding to the chain of command; verified field results let her yield control without pretending the conflict vanished.",
                 "relationships": "Mara values Example's technical judgment but expects mission authority to remain hers, creating a recurring divide between strategic orders and field execution.",
                 "voice": "Mara speaks in concise assignments, names responsibility directly, and avoids emotional appeals; approval arrives as expanded authority or a revised order rather than praise.",
+                "sample_lines": ["Your relay, your call. Your report by dawn.", "Noted. Don't make me note it twice."],
+                "never": "Praises anyone in front of the team.",
                 "source_ids": ["main"],
             },
         ]
@@ -2805,6 +3180,46 @@ def cmd_self_test(_args):
         embedded = entry_to_character_book(sample_selection, sample_entry, 0)
         assert embedded["keys"] == ["relay"]
         assert embedded["position"] == "before_char"
+
+        clean_errors, _ = lint_card_prose(compiled_card_data(project, card), [source_text])
+        assert not clean_errors, clean_errors
+        bad = deepcopy(card["data"])
+        bad["first_mes"] = (
+            "Rain hammers the dock. Her blade presses against your throat.\n\n"
+            "CLANG!\n\nYou flinch as she leans closer, seventy-five percent of her gem dark, "
+            "ten inches away, five paces from the door."
+        )
+        bad["mes_example"] = (
+            '<START>\n{{user}}: Why do you fight alone?\n{{char}}: "Because."\n'
+            '<START>\n{{user}}: Is it true you were a noble?\n{{char}}: "Once."'
+        )
+        bad["personality"] = (
+            "Her knuckles turn white. For a heartbeat she smirks. " + bad["personality"]
+        )
+        bad_errors, _ = lint_card_prose(bad, [source_text])
+        for needle in (
+            "narrates",
+            "sound-effect",
+            "weapon aimed",
+            "precise measurements",
+            "interview",
+            "stock machine-prose",
+        ):
+            assert any(needle in error for error in bad_errors), (needle, bad_errors)
+        copied = deepcopy(card["data"])
+        copied["description"] = paraphrases[0]
+        copy_errors, _ = lint_card_prose(copied, [source_text])
+        assert any("copy source wording" in error for error in copy_errors), copy_errors
+        missing_samples = deepcopy(card)
+        del missing_samples["portrayal"]["voice"]["sample_lines"]
+        sample_errors, _, _ = validate_card(project, plan["sources"], missing_samples)
+        assert any("sample_lines" in error for error in sample_errors), sample_errors
+        lean_relationship = deepcopy(card)
+        for relationship in lean_relationship["portrayal"]["relationships"]:
+            relationship.pop("power")
+            relationship.pop("knowledge")
+        lean_errors, _, _ = validate_card(project, plan["sources"], lean_relationship)
+        assert not lean_errors, lean_errors
     print("Self-test passed.")
 
 
@@ -2846,6 +3261,12 @@ def build_parser():
         default="auto",
     )
     validate.set_defaults(func=cmd_validate)
+
+    lint = subparsers.add_parser(
+        "lint", help="Lint card prose in a workspace or a packed character.json"
+    )
+    lint.add_argument("path")
+    lint.set_defaults(func=cmd_lint)
 
     review = subparsers.add_parser("review-init", help="Create a bound review template")
     review.add_argument("workspace")

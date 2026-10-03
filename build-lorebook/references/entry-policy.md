@@ -5,6 +5,7 @@
 - [Entry Content](#entry-content)
 - [Draft Evidence](#draft-evidence)
 - [Relationship Enrichment](#relationship-enrichment)
+- [Temporal Applicability](#temporal-applicability)
 - [Spoiler Policy](#spoiler-policy)
 - [Conditional Spoiler Layers](#conditional-spoiler-layers)
 - [SillyTavern Settings](#sillytavern-settings)
@@ -34,6 +35,19 @@ Add `source_evidence` to every new entry while the relevant source is already op
 - State the relevant continuity or time point when a relationship changes. Keep later betrayals, identities, deaths, and outcome-dependent affiliations in conditional entries.
 - Prefer relationship facts that change dialogue or behavior in RP. Omit trivia that does not affect how entities perceive or respond to one another.
 
+## Temporal Applicability
+
+- Default to one reusable canon reference, not a separate book for each character card's opening. Stable identity and world rules belong in base entries; split materially changed status, relationships, powers, and event outcomes into applicable layers. Use existing conditional children when these layers reuse a parent's source page, respecting the project's spoiler policy.
+- Put the relevant continuity, period or prerequisite, and any character-knowledge limit in `content`, not only in `memo`, `settings_rationale`, or export metadata. Only prompt-visible wording can guide the model after retrieval. Use source-supported periods and knowledge claims; applicability framing must not invent facts and remains subject to sentence-level evidence review.
+- Describe canon events as events in the source chronology, not scheduled events in the current session. A later fate or affiliation does not overwrite an earlier-period portrayal, a survival divergence, or a different outcome established in play. Stable world rules still apply unless the user deliberately changes the premise.
+- Separate an objective fact from who knows it. Receiving secret mechanics in model context does not let every NPC explain them; state the sourced knowledge asymmetry where it affects play. Do not equate spoiler permission with character knowledge.
+- Topic activation is not event confirmation. A hypothetical question such as "Can Sayaka avoid becoming a witch?" may retrieve a canon outcome, but does not establish that she has transformed. A layer should describe its canon context without asserting that context is the current session.
+- For standalone use, make temporal entries understandable without a companion card. For composition, the card supplies the opening and the current session summary supplies changes and divergences. Keep session-specific progress out of the reusable canon source book; recommend an existing chat summary or memory when progression needs tracking.
+- In a companion book, cover facts needed to pursue the card's main thread, such as relevant locations, authority, resources and constraints. Keep authored opening goals and immediate stakes in the card, so an inactive keyword cannot hide the direction. Do not turn sourced event entries into a compulsory quest order or invent canonical facts to justify an authored plot.
+- Keywords and recursion isolation control retrieval, not chronological state. These artifacts provide semantic applicability guidance, not automatic phase advancement or guaranteed secret isolation. When strict isolation is requested, keep unavailable layers disabled or outside the active subset until deliberately enabled; an external runtime gate is needed for automatic enforcement.
+
+For example, a later-outcome layer can describe a transformation as occurring in the original story after its prerequisite events, rather than saying the character "is now" transformed. If the current chat instead establishes that the character was saved, that outcome remains canon reference, not the session's present state. Keep any reveal-specific example out of a safe entry.
+
 ## Spoiler Policy
 
 - `avoid`: Opening-premise facts only. Remove later events, outcomes, causes, discoveries, changed status, secret identities, deaths, transformations, and ending information.
@@ -57,7 +71,7 @@ Make every conditional entry a child of a safe entry with `spoiler_parent_id`. K
 8. Choose exactly one activation mode per entry: distinct spoiler names as primary keys with no secondary filter, or safe parent keys plus specific reveal-intent secondary keys. Do not put a distinct spoiler name in the secondary list where it cannot activate alone.
 9. Keep one reveal boundary per conditional entry. Time-loop origins and a later-film transformation need separate entries because a question about one must not inject the other.
 
-This hides spoilers from prompt context, not from a human opening the lorebook JSON or editor.
+This keeps spoilers out of prompt context until a matching topic activates the entry; it does not enforce story prerequisites or character knowledge, and does not hide content from a human opening the lorebook JSON or editor. See Temporal Applicability above.
 
 ## SillyTavern Settings
 
